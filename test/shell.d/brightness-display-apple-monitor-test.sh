@@ -87,6 +87,69 @@ pass "a connector with an empty EDID yields no EDID"
 [[ -z $(usb_container_id /dev/usb/hiddev9 || true) ]] || fail "a hiddev node with no sysfs entry has no Container ID"
 pass "a hiddev node with no sysfs entry has no Container ID"
 
+# --- Display selection and the per-monitor cache ------------------------------
+# Real hiddev nodes and asdcontrol need hardware and root, so stand in for the node
+# listing, the character-device check, and `sudo asdcontrol`. Detection lists the
+# right display first, so picking the left one proves the match beats the order.
+# hiddev0 is another interface of the right display, which --detect doesn't report.
+add_display hiddev0 1-1 "$right_id"
+add_monitor DP-9 "00000000000000000000000000000000"
+
+detect_log="$TMPDIR/detect.log"
+
+hiddev_nodes() { printf '/dev/usb/hiddev%s\n' 0 2 7; }
+is_hiddev_node() { [[ $1 == /dev/usb/hiddev* ]]; }
+sudo() { "$@"; }
+asdcontrol() {
+  if [[ $1 == "--detect" ]]; then
+    printf '%s\n' "$*" >>"$detect_log"
+    printf '%s: USB Monitor - SUPPORTED.\n' /dev/usb/hiddev2 /dev/usb/hiddev7
+  fi
+}
+
+select_device() {
+  monitor="$1"
+  monitor_edid=""
+  [[ -z $monitor ]] || monitor_edid="$(monitor_edid_hex || true)"
+  device_cache="$TMPDIR/omarchy-brightness-display-apple${monitor:+.$monitor}.device"
+  : >"$detect_log"
+  find_apple_display_device
+}
+
+detections() {
+  grep -c -- "--detect" "$detect_log" || true
+}
+
+rm -f "$TMPDIR"/*.device
+[[ $(select_device DP-8) == "/dev/usb/hiddev7" ]] ||
+  fail "selects the requested display when it isn't detected first"
+[[ $(<"$TMPDIR/omarchy-brightness-display-apple.DP-8.device") == "/dev/usb/hiddev7" ]] ||
+  fail "caches the selected display under the monitor's name"
+pass "selects the requested display when it isn't detected first"
+
+[[ $(select_device DP-8) == "/dev/usb/hiddev7" ]] && (( $(detections) == 0 )) ||
+  fail "reuses a cached node that matches the monitor without detecting" "detections: $(detections)"
+pass "reuses a cached node that matches the monitor without detecting"
+
+printf '/dev/usb/hiddev2\n' >"$TMPDIR/omarchy-brightness-display-apple.DP-8.device"
+[[ $(select_device DP-8) == "/dev/usb/hiddev7" ]] && (( $(detections) == 1 )) ||
+  fail "re-detects when the cache holds another display's node"
+[[ $(<"$TMPDIR/omarchy-brightness-display-apple.DP-8.device") == "/dev/usb/hiddev7" ]] ||
+  fail "replaces another display's node in the cache"
+pass "re-detects and repairs a cache holding another display's node"
+
+[[ $(select_device DP-9) == "/dev/usb/hiddev2" ]] && (( $(detections) == 1 )) ||
+  fail "falls back to the first display when nothing matches the monitor"
+[[ $(select_device DP-9) == "/dev/usb/hiddev2" ]] && (( $(detections) == 0 )) ||
+  fail "reuses the cached fallback without detecting again" "detections: $(detections)"
+pass "falls back to the first display and reuses that cache when nothing matches"
+
+[[ $(select_device "") == "/dev/usb/hiddev2" ]] ||
+  fail "uses the first display when no monitor is given"
+[[ -f $TMPDIR/omarchy-brightness-display-apple.device ]] ||
+  fail "keeps the shared cache name when no monitor is given"
+pass "uses the first display and the shared cache when no monitor is given"
+
 # The monitor name ends up in a cache filename and a sysfs glob.
 status=0
 PATH="$ROOT/bin:$PATH" omarchy-brightness-display-apple --monitor "../evil" >/dev/null 2>&1 || status=$?

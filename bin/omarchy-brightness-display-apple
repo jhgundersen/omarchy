@@ -102,15 +102,38 @@ device_matches_monitor() {
   [[ -n $container_id && $monitor_edid == *"$container_id"* ]]
 }
 
+# Succeeds when some hiddev node belongs to the requested monitor. Only reads
+# sysfs, so it costs no asdcontrol call.
+monitor_has_matching_device() {
+  local path=""
+
+  while read -r path; do
+    device_matches_monitor "$path" && return 0
+  done < <(hiddev_nodes)
+
+  return 1
+}
+
+hiddev_nodes() {
+  local path=""
+
+  for path in /dev/usb/hiddev* /dev/hiddev*; do
+    [[ -e $path ]] && printf '%s\n' "$path"
+  done
+}
+
+# The globs are left unquoted on purpose: [[ ]] pattern-matches an unquoted right
+# side, and quoting them would turn the match into a literal string comparison.
+is_hiddev_node() {
+  [[ ( $1 == /dev/hiddev* || $1 == /dev/usb/hiddev* ) && -c $1 ]]
+}
+
 detect_apple_display_device() {
   local devices=()
   local displays=()
   local path=""
 
-  for path in /dev/usb/hiddev* /dev/hiddev*; do
-    [[ -e $path ]] && devices+=("$path")
-  done
-
+  mapfile -t devices < <(hiddev_nodes)
   (( ${#devices[@]} > 0 )) || return 1
 
   mapfile -t displays < <(sudo asdcontrol --detect "${devices[@]}" 2>/dev/null | awk -F: '/^\/dev\/(usb\/)?hiddev/{ print $1 }')
@@ -138,14 +161,13 @@ find_apple_display_device() {
     read -r cached <"$device_cache" || true
     # Trust a cached value only if it still names a hiddev character device. A
     # stale or unexpected cache (a regular file, a non-hiddev node) is ignored and
-    # we re-detect instead of handing an arbitrary path to asdcontrol. The globs
-    # are left unquoted on purpose: [[ ]] pattern-matches an unquoted right side,
-    # and quoting them would turn the match into a literal string comparison.
+    # we re-detect instead of handing an arbitrary path to asdcontrol.
     #
-    # A replug can also hand the cached node to another display, so when the cached
-    # node has a Container ID it must still match the requested monitor.
-    if [[ ( $cached == /dev/hiddev* || $cached == /dev/usb/hiddev* ) && -c $cached ]]; then
-      if [[ -z $monitor_edid ]] || ! usb_container_id "$cached" >/dev/null || device_matches_monitor "$cached"; then
+    # A replug can also hand the cached node to another display, so it is dropped
+    # when it doesn't match the requested monitor but another node does. A cached
+    # first-display fallback (nothing matches the monitor) is still reused.
+    if is_hiddev_node "$cached"; then
+      if [[ -z $monitor_edid ]] || device_matches_monitor "$cached" || ! monitor_has_matching_device; then
         printf '%s\n' "$cached"
         return 0
       fi
